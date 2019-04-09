@@ -250,7 +250,7 @@ int make_signal(point pt, float *signal, float q, MJD_Siggen_Setup *setup)
 			setup->dpath_e[t] = new_pt;
 		}
     	
-		if (collect2pc) {
+		if (1) {// calculate charge cloud enlargement for electrons, too
 			if (t == 0) {
 				vel1 = setup->final_vel = setup->initial_vel = vector_length(v);
 				setup->final_charge_size = setup->charge_cloud_size;
