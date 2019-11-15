@@ -234,11 +234,11 @@ int get_signal(point pt, float *signal_out, MJD_Siggen_Setup *setup) {
 */
 int make_signal(point pt, float *signal, float q, MJD_Siggen_Setup *setup) 
 {
-	static float wpot, wpot_old, dwpot;
+	static float wpot, dwpot;
 	char   tmpstr[MAX_LINE];
 	point  new_pt;
   	vector v, dx;
-  	float  vel0, vel1 = 0;
+  	float  vel0, vel1 = 0, wpot_old=-1;
   	// double diffusion_coeff;
   	double repulsion_fact = 0.0, ds2, ds3, dv, ds_dt;
   	int    ntsteps, i, t, n, collect2pc, low_field=0;
