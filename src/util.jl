@@ -2,22 +2,22 @@
 
 function tuplestr(s::NTuple{N,Cchar}) where {N}
     a = [c % UInt8 for c in s]
-    from = firstindex(a)
-    to = something(findfirst(x -> x == 0, a), lastindex(a) + 1) - 1
+    from = findfirst(x -> x != 0, a)
+    to = something(findfirst(x -> x == 0, a[from:end]), lastindex(a) + 1) - 1
     String(a[from:to])
 end
 
 
-config_file_name(setup::Struct_MJD_Siggen_Setup) =
+config_file_name(setup) =
     tuplestr(setup.config_name)
 
-field_file_name(setup::Struct_MJD_Siggen_Setup) = 
+field_file_name(setup) = 
     joinpath(dirname(config_file_name(setup)), tuplestr(setup.field_name))
 
-wpot_file_name(setup::Struct_MJD_Siggen_Setup) = 
+wpot_file_name(setup) = 
     joinpath(dirname(config_file_name(setup)), tuplestr(setup.wp_name))
 
-function read_fields(setup::Struct_MJD_Siggen_Setup)
+function read_fields(setup)
     field_data = readdlm(field_file_name(setup), comments=true)
     wpot_data = readdlm(wpot_file_name(setup), comments=true)
     n_r = setup.rlen
