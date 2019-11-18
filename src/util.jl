@@ -3,8 +3,8 @@
 function tuplestr(s::NTuple{N,Cchar}) where {N}
     a = [c % UInt8 for c in s]
     from = findfirst(x -> x != 0, a)
-    to = something(findfirst(x -> x == 0, a[from:end]), lastindex(a) + 1) - 1
-    String(a[from:to])
+    to = something(findfirst(x -> x == 0, a[from:lastindex(a)]), lastindex(a) + 1) - 1
+    String(a[from:from + to-1])
 end
 
 
