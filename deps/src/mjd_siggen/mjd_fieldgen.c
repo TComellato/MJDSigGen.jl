@@ -871,7 +871,7 @@ int main(int argc, char **argv)
     rmin = zmin = 99.9;
     int RS = -R;
     int rr;
-    for (int rr=RS; rr<R+1; rr++) {
+    for (rr=RS; rr<R+1; rr++) {
       r = rr;
       if (rr < 0) r= -rr;
       for (z=0; z<L+1; z++) {
