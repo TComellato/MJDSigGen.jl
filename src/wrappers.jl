@@ -239,8 +239,8 @@ function fieldgen(config_filename::AbstractString)
     setup = Struct_MJD_Siggen_Setup()
     read_config!(setup, config_filename)
 
-    mkpath(dirname(field_file_name(setup)))
-    mkpath(dirname(wpot_file_name(setup)))
+    mkpath(dirname(field_file_name(setup, config_filename)))
+    mkpath(dirname(wpot_file_name(setup, config_filename)))
 
     run(`$fieldgen_exe -c $config_filename`)
 end
