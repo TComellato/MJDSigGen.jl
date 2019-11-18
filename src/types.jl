@@ -83,7 +83,7 @@ mutable struct Struct_MJD_Siggen_Setup
     inner_taper_width::Cfloat
     top_bullet_radius::Cfloat
     bottom_bullet_radius::Cfloat
-    hole_bullet_radius::CFloat
+    hole_bullet_radius::Cfloat
     Li_thickness::Cfloat
 
     # electric fields & weighing potentials
