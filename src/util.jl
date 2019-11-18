@@ -8,16 +8,13 @@ function tuplestr(s::NTuple{N,Cchar}) where {N}
 end
 
 
-config_file_name(setup) =
-    tuplestr(setup.config_name)
+field_file_name(setup, path_to_config) = 
+    joinpath(dirname(path_to_config), tuplestr(setup.field_name))
 
-field_file_name(setup) = 
-    joinpath(dirname(config_file_name(setup)), tuplestr(setup.field_name))
+wpot_file_name(setup, path_to_config) = 
+    joinpath(dirname(path_to_config), tuplestr(setup.wp_name))
 
-wpot_file_name(setup) = 
-    joinpath(dirname(config_file_name(setup)), tuplestr(setup.wp_name))
-
-function read_fields(setup)
+function read_fields(setup, path_to_config)
     field_data = readdlm(field_file_name(setup), comments=true)
     wpot_data = readdlm(wpot_file_name(setup), comments=true)
     n_r = setup.rlen
