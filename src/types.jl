@@ -83,6 +83,7 @@ mutable struct Struct_MJD_Siggen_Setup
     inner_taper_width::Cfloat
     top_bullet_radius::Cfloat
     bottom_bullet_radius::Cfloat
+    hole_bullet_radius::CFloat
     Li_thickness::Cfloat
 
     # electric fields & weighing potentials
@@ -101,7 +102,6 @@ mutable struct Struct_MJD_Siggen_Setup
     bulletize_PC::Cint
 
     # file names
-    config_name::NTuple{256,Cchar}
     drift_name::NTuple{256,Cchar}
     field_name::NTuple{256,Cchar}
     wp_name::NTuple{256,Cchar}
