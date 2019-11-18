@@ -813,7 +813,8 @@ int main(int argc, char **argv)
     rmin = zmin = 99.9;
     int RS = 0;
     if (WV > 1) RS = -R;
-    for (int rr=RS; rr<R+1; rr++) {
+    int rr;
+    for (rr=RS; rr<R+1; rr++) {
       r = rr;
       if (rr < 0) r= -rr;
       for (z=0; z<L+1; z++) {
@@ -869,6 +870,7 @@ int main(int argc, char **argv)
     fprintf(file, "#\n## r (mm), z (mm), \n");
     rmin = zmin = 99.9;
     int RS = -R;
+    int rr;
     for (int rr=RS; rr<R+1; rr++) {
       r = rr;
       if (rr < 0) r= -rr;
