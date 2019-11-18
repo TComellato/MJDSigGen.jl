@@ -17,14 +17,6 @@
 #include "point.h"
 #include "mjd_siggen.h"
 
-/* nearest_field_grid_index
-   find existing integer field grid index closest to pt
-   returns <0 if outside crystal or too far from a valid grid point
-            0 if interpolation is okay
-            1 if we can find a point but extrapolation is needed
-*/
-int nearest_field_grid_index(cyl_pt pt, cyl_int_pt *ipt, MJD_Siggen_Setup *setup);
-
 /* field_setup
    given a field directory file, read electic field and weighting
    potential tables from files listed in directory
@@ -49,20 +41,10 @@ int wpotential(point pt, float *wp, MJD_Siggen_Setup *setup);
 */
 int drift_velocity(point pt, float q, vector *velocity, MJD_Siggen_Setup *setup);
 
-/* TC: get drift_velocity with linear superposition of 2 fields:
-		1. Detector field, E
-		2. Charge cloud field, Eadd
-*/
-int drift_velocity_w_Eadd(point pt, float q, vector *velo, MJD_Siggen_Setup *setup, cyl_pt Eadd);
-
-/* TC: get drift_velocity from Efield */
-int drift_velocity_from_Efield(point pt, float q, vector *velo, MJD_Siggen_Setup *setup, cyl_pt Efield);
-
 int read_fields(MJD_Siggen_Setup *setup);
 
 /*set detector temperature. 77F (no correction) is the default
    MIN_TEMP & MAX_TEMP defines allowed range*/
 void set_temp(float temp, MJD_Siggen_Setup *setup);
-
 
 #endif /*#ifndef _FIELDS_H*/

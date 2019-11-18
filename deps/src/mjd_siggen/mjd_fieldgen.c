@@ -9,10 +9,16 @@
       - added optional bulletization of point contact
    This modified version: Dec 2016
       - added hole, inner taper length, outer taper length, taper angle
+   Nov  2017: added top bulletization
+
+   May-July 2019
+      - added dead layer / Li thickness
+      - added over-relaxation factor; gained factor of ~ 40 speedup, depending on size/grid
+      - added code to estimate full-depletion voltage in the case of bubble depletion (pinch-off)
 
    TO DO:
       - add other bulletizations
-      - add dead layer / Li thickness
+
       - on coarse grids, interpolate the position of L, R, LT, and the ditch
             (as is done now already for RC and LC)
 */
@@ -28,7 +34,18 @@
 #define MAX_ITS 50000     // default max number of iterations for relaxation
 #define MAX_ITS_FACTOR 2  // factor by which max iterations is reduced as grid is refined
 #define OT_R  R - (int) (0.5 + (float)(z-L+OTL) * (float)OTW / (float)OTL)  // outer radius due to taper 
-#define IT_R  RH + (int) (0.5 + (float)(z-L+HTL) * (float)HTW / (float)HTL)  // inner radius due to taper 
+#define IT_R  (RH + (int) (0.5 + (float)(z-L+HTL) * (float)HTW / (float)HTL))  // inner radius due to taper
+#define OT_R_TBR  ((TBR > 0 && TBR < OTL) ? R - LiT - (int) (0.5 + (float)(OTL-TBR) * (float)OTW / (float)OTL) : R - LiT)
+#define TBR_TEST  ((TBR > 0 && r > OT_R_TBR - TBR && z > L-TBR && \
+                   (r-OT_R_TBR+TBR)*(r-OT_R_TBR+TBR) + (z-L+LiT+TBR)*(z-L+LiT+TBR) > TBR*TBR)) // test for top bulletization
+#define BBR_TEST  ((BBR > 0 && r > R-LiT-BBR && z < BBR + LiT && \
+                   (r-R+LiT+BBR)*(r-R+LiT+BBR) + (z-BBR-LiT)*(z-BBR-LiT) > BBR*BBR))     // test for bottom bulletization
+
+// #define OVER_RELAX_FACTOR 0.98
+// the following definition of the factor for over-relaxation improves convergence time by a factor ~ 70 for a 2kg ICPC detector
+#define OVER_RELAX_FACTOR (0.976 + 0.006 * (double) istep)
+// #define OVER_RELAX_FACTOR (0.988 * (1.0 - 1.0/(double)(1+iter/4)))
+
 
 int report_config(FILE *fp_out, char *config_file_name);
 
@@ -50,11 +67,13 @@ int main(int argc, char **argv)
 
   int   RH  = 10; // radius of core hole in outer (Li) contact, in grid lengths
   int   LH  = 80; // length of core hole in outer (Li) contact, in grid lengths
+  int   HBR = 5;  // bulletization radius at bottom of hole
   int   OTL = 80; // length of outer radial taper of crystal, in grid lengths
   int   OTW = 10; // width/amount of outer radial taper (decrease in radius), in grid lengths
   int   HTL = 0;  // length of radial tapered part of core hole, in grid lengths
   int   HTW = 0;  // width/amount of radial taper (increase in radius) of hole, in grid lengths
 
+  int   TBR = 0; // radius of bulletization at top of crystal
   float BV = 0;  // bias voltage
   float N = 1;   // charge density at z=0 in units of e+10/cm3
   float M = 0;   // charge density gradient, in units of e+10/cm4
@@ -64,30 +83,40 @@ int main(int argc, char **argv)
                  // 2: write the V and E values for both +r, -r (for gnuplot, NOT for siggen)
   int   WP = 0;  // 0: do not calculate the weighting potential
                  // 1: calculate the WP and write the values to ppc_wp.dat
+  int   WD = 0;  // 0: do not write out depletion surface
+                 // 1: write out depletion surface to depl_<HV>.dat
   /* ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  --- */
 
   double **v[2], **eps, **eps_dr, **eps_dz, **vfraction, *s1, *s2;
-  char   **undepleted, config_file_name[256];
-  int    **bulk, *rrc;
-  float  *drrc, *frrc;
+  char   **undepleted, config_file_name[256], fname[256];
+  int    **bulk, *rrc, *rrh;
+  float  *drrc, *frrc; //, *drrh, *frrh;
   double eps_sum, v_sum, mean, min, f, f1z, f2z, f1r, f2r;
   double e_over_E = 11.31; // e/epsilon
                            // for 1 mm2, charge units 1e10 e/cm3, espilon = 16*epsilon0
-  float  dif, sum_dif=0, max_dif, a, b, c, grid = 0.5, dRC, dLC, fLC=0;
-  float  E_r, E_z, bubble_volts=0, cs, gridstep[3];
+  float  dif, sum_dif=0, max_dif, a, b, c, grid = 0.5, dRC, dLC, fLC=0; //, dRH;
+  float  E, E_r, E_z, bubble_volts=0, cs, gridstep[3], Emin, rmin, zmin;
   int    i, j, r, z, iter, old, new=0, zz, rr, istep, max_its;
   FILE   *file;
   time_t t0=0, t1, t2=0;
   double esum, esum2, pi=3.14159, Epsilon=(8.85*16.0/1000.0);  // permittivity of Ge in pF/mm
   double pinched_sum1, pinched_sum2, *imp_ra, *imp_rm, *imp_z, S=0;
-  int    gridfact, fully_depleted=0, LL=L, RR=R, zmax, rmax;
+  int    gridfact, fully_depleted=0, LL=L, RR=R, LiT=0, BBR=0, zmax, rmax, vminr=0, vminz=0;
+  double **vsave;
+  double min2, dVn[4], dWn[4], test, save_dif;
+  int    vminr2=0, vminz2=0;
+  FILE   *fp;
+  float  rho_z[256] = {0};
+
 
   if (argc%2 != 1) {
     printf("Possible options:\n"
 	   "      -c config_file_name\n"
 	   "      -b bias_volts\n"
 	   "      -w {0,1}    (do_not/do write the field file)\n"
-	   "      -p {0,1}    (do_not/do write the WP file)\n");
+	   "      -d {0,1}    (do_not/do write the depletion surface)\n"
+	   "      -p {0,1}    (do_not/do write the WP file)\n"
+           "      -r rho_spectrum_file_name\n");
     return 1;
   }
 
@@ -110,13 +139,14 @@ int main(int argc, char **argv)
 
       LH = lrint(setup.hole_length/grid);
       RH = lrint(setup.hole_radius/grid);
+      HBR = lrint(setup.hole_bullet_radius/grid);
       OTL = lrint(setup.outer_taper_length/grid);
       OTW = lrint(setup.outer_taper_width/grid);
       HTL = lrint(setup.inner_taper_length/grid);
       HTW = lrint(setup.inner_taper_width/grid);
-      // BRT = lrint(setup.top_bullet_radius/grid);
-      // BRB = lrint(setup.bottom_bullet_radius/grid);
-      // LiT = lrint(setup.Li_thickness/grid);
+      LiT = lrint(setup.Li_thickness/grid);
+      TBR = lrint(setup.top_bullet_radius/grid);
+      BBR = lrint(setup.bottom_bullet_radius/grid);
       N  = setup.impurity_z0;
       M  = setup.impurity_gradient;
       BV = setup.xtal_HV;
@@ -127,8 +157,20 @@ int main(int argc, char **argv)
       BV = atof(argv[i+1]);   // bias volts
     } else if (strstr(argv[i], "-w")) {
       WV = atoi(argv[i+1]);   // write-out options
+    } else if (strstr(argv[i], "-d")) {
+      WD = atoi(argv[i+1]);   // write-out options
     } else if (strstr(argv[i], "-p")) {
       WP = atoi(argv[i+1]);   // weighting-potential options
+    } else if (strstr(argv[i], "-r")) {
+      if (!(fp = fopen(argv[i+1], "r"))) {   // impurity-profile-spectrum file name
+        printf("\nERROR: cannot open impurity profile spectrum file %s\n\n", argv[i+1]);
+        return 1;
+      }
+      fread(rho_z, 36, 1, fp);
+      fread(rho_z, sizeof(rho_z), 1, fp);
+      fclose(fp);
+      printf(" z(mm)   rho\n");
+      for (i=0; i < 200 && rho_z[i] != 0.0f; i++)  printf(" %3d  %7.3f\n", i, rho_z[i]);
     } else {
       printf("Possible options:\n"
 	     "      -c config_file_name\n"
@@ -169,13 +211,17 @@ int main(int argc, char **argv)
              grid * (float) RH, grid * (float) LH);
   }
   if (OTL > 0) {
-      printf("Outside taper: %.1f mm over x %.1f mm (%.2f degrees)\n\n",
-             grid * (float) OTW, grid * (float) OTL, setup.taper_angle);
+    printf("Outside taper: %.1f mm over %.1f mm (%.2f degrees)\n\n",
+           grid * (float) OTW, grid * (float) OTL, setup.taper_angle);
   } else if (LH <= 0) {
     printf("  No core hole or outside taper.\n");
   } else {
     printf("  No outside taper.\n");
   }
+  if (LiT > 0) {
+    printf("Li contact thickness: %.1f mm\n\n", grid * (float) LiT);
+  }
+
   if (LC > 0 && setup.bulletize_PC) {
     printf("      Contact: Radius x length: %.1f x %.1f mm, bulletized\n",
 	   grid * (float) RC, grid * (float) LC);
@@ -187,6 +233,7 @@ int main(int argc, char **argv)
 	   grid * (float) RC, grid * (float) LC);
   }
   if (RO <= 0.0 || RO >= R) {
+    // RO = R - LT/3;    // inner radius of bottom taper, in grid lengths
     RO = R - LT;    // inner radius of bottom taper, in grid lengths
     printf(" No wrap-around contact or ditch...\n");
   } else {
@@ -201,6 +248,9 @@ int main(int argc, char **argv)
     printf("ERROR: Expect bias and impurity to be opposite sign!\n");
     return 1;
   }
+  if (TBR > 0)
+    printf("   Radius of top-of-crystal bulletization is %.1f mm\n\n", grid * (float) TBR);
+
   if (N > 0) {
     // swap polarity for n-type material; this lets me assume all voltages are positive
     BV = -BV;
@@ -208,12 +258,15 @@ int main(int argc, char **argv)
     N = -N;
   }
 
+  setup.hole_bullet_radius += setup.Li_thickness;  // adjust hole bulletization
+  setup.hole_length += setup.Li_thickness;         // and hole length for Li thickness
+
   /* malloc arrays
      float v[2][L+5][R+5];
      float eps[L+1][R+1], eps_dr[L+1][R+1], eps_dz[L+1][R+1];
-     float vfraction[L+1][R+1], s1[R], s2[R], drrc[LC+2], drrc[LC+2];
+     float vfraction[L+1][R+1], s1[R], s2[R], drrc[LC+2], drrc[LC+2], drrh[L+1], drrh[L+1];
      char  undepleted[R+1][L+1];
-     int   bulk[L+1][R+1], rrc[LC+2];
+     int   bulk[L+1][R+1], rrc[LC+2], rrh[L+1];
   */
   if ((v[0]   = malloc((L+5)*sizeof(*v[0]))) == NULL ||
       (v[1]   = malloc((L+5)*sizeof(*v[1]))) == NULL ||
@@ -229,8 +282,14 @@ int main(int argc, char **argv)
       (rrc   = malloc((LC+2)*sizeof(*rrc)))  == NULL ||
       (drrc  = malloc((LC+2)*sizeof(*drrc))) == NULL ||
       (frrc  = malloc((LC+2)*sizeof(*frrc))) == NULL ||
+      (rrh   = malloc((L+1)*sizeof(*rrh)))  == NULL ||
+      //(drrh  = malloc((L+1)*sizeof(*drrh))) == NULL ||
+      //(frrh  = malloc((L+1)*sizeof(*frrh))) == NULL ||
       (s1 = malloc((R+1)*sizeof(*s1))) == NULL ||
-      (s2 = malloc((R+1)*sizeof(*s2))) == NULL) {
+      (s2 = malloc((R+1)*sizeof(*s2))) == NULL ||
+      //(vsave = malloc((LC+2)*sizeof(*vsave))) == NULL
+      (vsave = malloc((L)*sizeof(*vsave))) == NULL
+      ) {
     printf("Malloc failed\n");
     return 1;
   }
@@ -242,6 +301,8 @@ int main(int argc, char **argv)
   for (j=0; j<L+1; j++) if ((eps_dz[j] = malloc((R+1)*sizeof(**eps_dz))) == NULL) ERR;
   for (j=0; j<L+1; j++) if ((bulk[j] = malloc((R+1)*sizeof(**bulk))) == NULL) ERR;
   for (j=0; j<L+1; j++) if ((vfraction[j] = malloc((R+1)*sizeof(**vfraction))) == NULL) ERR;
+  //for (j=0; j<LC+2; j++) if ((vsave[j]  = malloc((RC+2)*sizeof(**vsave)))  == NULL) ERR;
+  for (j=0; j<L; j++) if ((vsave[j]  = malloc((R)*sizeof(**vsave)))  == NULL) ERR;
   for (j=0; j<R+1; j++) {
     if ((undepleted[j] = malloc((L+1)*sizeof(**undepleted))) == NULL) ERR;
     memset(undepleted[j], ' ', (L+1)*sizeof(**undepleted));
@@ -349,8 +410,9 @@ int main(int argc, char **argv)
     // recalculate geometry dimensions in units of the current grid size
     L  = lrint(setup.xtal_length/grid);
     R  = lrint(setup.xtal_radius/grid);
-    // BRT = lrint(setup.top_bullet_radius/grid);
-    // BRB = lrint(setup.bottom_bullet_radius/grid);
+    LiT = lrint(setup.Li_thickness/grid);
+    TBR = lrint(setup.top_bullet_radius/grid);
+    BBR = lrint(setup.bottom_bullet_radius/grid);
     LC = lrint(setup.pc_length/grid);
     // distance in grid units from PC length to the middle of the nearest pixel:
     dLC = setup.pc_length/grid - (float) LC;
@@ -400,17 +462,46 @@ int main(int argc, char **argv)
     WO = lrint(setup.ditch_thickness/grid);
     LH = lrint(setup.hole_length/grid);
     RH = lrint(setup.hole_radius/grid);
+    HBR = lrint(setup.hole_bullet_radius/grid);
     OTL = lrint(setup.outer_taper_length/grid);
     OTW = lrint(setup.outer_taper_width/grid);
     HTL = lrint(setup.inner_taper_length/grid);
     HTW = lrint(setup.inner_taper_width/grid);
-    // LiT = lrint(setup.Li_thickness/grid);
+
+    /* set up bulletization inside hole */
+    //dRH = setup.hole_radius/grid - (float) RH;
+    //if (dRC < 0.05 && dRC > -0.05) dRC = 0;
+    for (z=L-LH; z<=L; z++) {
+      rrh[z] = RH;
+      //drrh[z] = dRH;
+      //frrh[z] = 0;
+    }
+    if (LH > 0 && RH > 0 && HBR > 0) {
+      for (z=L-LH; z<L-LH+HBR+2; z++) {
+        a = setup.hole_radius - setup.hole_bullet_radius;
+        b = setup.xtal_length - setup.hole_length + setup.hole_bullet_radius - z*grid;
+        c = setup.hole_bullet_radius*setup.hole_bullet_radius - b*b;
+        if (c < 0.0) c = 0;
+        c = a + sqrt(c);
+        rrh[z] = lrint(c/grid);
+        //drrh[z] = c/grid - (float) rrc[z];
+        //if (drrh[z] < 0.05 && drrh[z] > -0.05) drrh[z] = 0;
+        //frrh[z] = 0;
+      }
+    }
 
     S = setup.impurity_surface * e_over_E / grid;
-    for (z=0; z<L+1; z++) {
-      imp_z[z] = (N + 0.1 * M * grid * (double) z + 
-		  setup.impurity_quadratic * (1.0 - (double) ((z-L/2)*(z-L/2)) /
-					      (double) (L*L/4))) * e_over_E;
+    if (rho_z[0] != 0) {
+      for (z=0; z<L+1; z++) {
+        imp_z[z] = rho_z[(int)(grid * (double) z + 0.5)] * e_over_E;
+      }
+    } else {
+      for (z=0; z<L+1; z++) {
+        imp_z[z] = (N + 0.1 * M * grid * (double) z + 
+                    setup.impurity_quadratic * (1.0 - (double) ((z-L/2)*(z-L/2)) /
+                                                (double) (L*L/4))) * e_over_E;
+        // if (istep == 0) printf("%.2f %.3f %.3f\n", z*grid, imp_z[z]/e_over_E, N + 0.1 * M * grid * (double) z);
+      }
     }
     if (setup.impurity_rpower > 0.1) {
       for (r=0; r<R+1; r++) {
@@ -423,6 +514,7 @@ int main(int argc, char **argv)
     if (setup.verbosity >= NORMAL)
       printf("grid = %f  RC = %d  dRC = %f  LC = %d  dLC = %f\n\n",
 	     grid, RC, dRC, LC, dLC);
+    //if (RO <= 0.0 || RO >= R) RO = R - LT/3;    // inner radius of taper, in grid lengths
     if (RO <= 0.0 || RO >= R) RO = R - LT;    // inner radius of taper, in grid lengths
 
     if (istep == 0) {
@@ -452,19 +544,20 @@ int main(int argc, char **argv)
       for (r=0; r<R+1; r++) {
 	vfraction[z][r] = 1.0;
 	if (z < LO && r < RO && r > RO-WO-1) {
-	  vfraction[z][r] = 0.0;
+	  vfraction[z][r] = 0.0;  // no Ge inside the ditch
 	}
 	// boundary conditions
 	bulk[z][r] = 0;  // flag for normal bulk, no complications
 	// outside (HV) contact:
-	if (z == L ||
-	    r == R ||
-	    r >= z + R - LT ||          // bottom taper
-	    (z == 0 && r >= RO) ||      // wrap-around
-            (L-z <= LH && r <= RH) ||   // hole
-            (L-z < OTL && r >= OT_R) || // outer taper
-            (L-z < HTL && r <= IT_R)    // inner taper
-            ) {
+	if (z >= L-LiT ||
+	    r >= R-LiT ||
+	    //r >= z/3 + R - LT/3 ||           // bottom taper
+	    r >= z + R-LiT - LT ||             // bottom taper  // FIXME: LiT at angle
+	    (z <= LiT && r >= RO) ||           // wrap-around
+            (L-z <= LH && r <= rrh[z]+LiT) ||  // hole
+            (L-z < OTL && r >= OT_R-LiT) ||    // outer taper  // FIXME: LiT at angle
+            (L-z < HTL && r <= IT_R+LiT) ||    // inner taper  // FIXME: LiT at angle
+            TBR_TEST || BBR_TEST) {            // top and bottom bulletization
 	  bulk[z][r] = -1;               // value of v[*][z][r] is fixed...
 	  v[0][z][r] = v[1][z][r] = BV;  // at the bias voltage
 	}
@@ -511,6 +604,10 @@ int main(int argc, char **argv)
     // now do the actual relaxation
     //for (iter=0; iter<max_its/3; iter++) {
     for (iter=0; iter<max_its; iter++) {
+      double OR_fact = OVER_RELAX_FACTOR;
+      if (iter < 2) OR_fact = 0.0;
+      else if (iter < 200) OR_fact *= 0.9;
+
       if (old == 0) {
 	old = 1;
 	new = 0;
@@ -525,6 +622,8 @@ int main(int argc, char **argv)
       for (z=0; z<L; z++) {
 	for (r=0; r<R; r++) {
 	  if (bulk[z][r] < 0) continue;      // outside or inside contact
+          save_dif = v[old][z][r] - v[new][z][r];  // step difference from previous iteration
+          // if (iter < 2) save_dif = 0; 
 
 	  if (bulk[z][r] == 0) {             // normal bulk, no complications
 	    v_sum = v[old][z+1][r]*eps_dz[z][r] + v[old][z][r+1]*eps_dr[z][r]*s1[r];
@@ -615,6 +714,8 @@ int main(int argc, char **argv)
 	  }
 	  // calculate difference from last iteration, for convergence check
 	  dif = v[old][z][r] - v[new][z][r];
+          v[new][z][r] += OR_fact*save_dif; // do over-relaxation
+
 	  if (dif < 0.0f) dif = -dif;
 	  sum_dif += dif;
 	  if (max_dif < dif) max_dif = dif;
@@ -691,14 +792,12 @@ int main(int argc, char **argv)
       }
     }
     // write potential and field to output file
-    char *field_file_name = resolve_path_rel_to(setup.field_name, setup.config_name);
-    if (!(file = fopen(field_file_name, "w"))) {
-      printf("ERROR: Cannot open file %s for electric field...\n", field_file_name);
+    if (!(file = fopen(setup.field_name, "w"))) {
+      printf("ERROR: Cannot open file %s for electric field...\n", setup.field_name);
       return 1;
     } else {
-      printf("Writing electric field data to file %s\n", field_file_name);
+      printf("Writing electric field data to file %s\n", setup.field_name);
     }
-    free(field_file_name); field_file_name = 0;
     /* copy configuration parameters to output file */
     report_config(file, config_file_name);
     fprintf(file, "#\n# HV bias in fieldgen: %.1f V\n", BV);
@@ -710,7 +809,13 @@ int main(int argc, char **argv)
     }
     fprintf(file, "#\n## r (mm), z (mm), V (V),  E (V/cm), E_r (V/cm), E_z (V/cm)\n");
 
-    for (r=0; r<R+1; r++) {
+    Emin = 9999.9;
+    rmin = zmin = 99.9;
+    int RS = 0;
+    if (WV > 1) RS = -R;
+    for (int rr=RS; rr<R+1; rr++) {
+      r = rr;
+      if (rr < 0) r= -rr;
       for (z=0; z<L+1; z++) {
 	// calc E in r-direction
 	if (r==0) {
@@ -729,17 +834,70 @@ int main(int argc, char **argv)
 	} else {
 	  E_z = (v[new][z-1][r] - v[new][z+1][r])/(0.2*grid);
 	}
+        E = sqrt(E_r*E_r + E_z*E_z);
+        if (E > 0.1 && E < Emin &&
+            (R-LT-r)*grid > 5.0 &&               // more than 5 mm from outer radius
+            (L-z)*grid > 5.0 && z*grid > 5.0 &&  // more than 5 mm from top & bottom
+            (z > LC + 2 || r > RC + 2) &&        // outside point contact
+            (L-z > LH  || (r - rrh[z])*grid > 5) &&     // outside inner hole radius
+            (L-z > OTL || (OT_R - r)*grid > 5) &&       // inside outer taper radius
+            (L-z > HTL || (r - IT_R)*grid > 5)) {       // outside inner taper radius
+          Emin = E;
+          rmin = r*grid;
+          zmin = z*grid;
+        }
+            
 	fprintf(file, "%7.2f %7.2f %7.1f %7.1f %7.1f %7.1f\n",
-		((float) r)*grid,  ((float) z)*grid, v[new][z][r],
-		sqrt(E_r*E_r + E_z*E_z), E_r, E_z);
+		((float) rr)*grid,  ((float) z)*grid, v[new][z][r], E, E_r, E_z);
+      }
+      fprintf(file, "\n");
+    }
+    fclose(file);
+    printf("\n Minimum bulk field = %.1f V/cm at (r,z) = (%.1f, %.1f) mm\n\n",
+           Emin, rmin, zmin);
+  }
+
+  if (WD) {
+    // write depletion surface to output file
+    sprintf(fname, "depl_%4.4dV.dat", (int) BV);
+    if (!(file = fopen(fname, "w"))) {
+      printf("ERROR: Cannot open file %s for depletion...\n", fname);
+      return 1;
+    } else {
+      printf("Writing depletion surface data to file %s\n", fname);
+    }
+    fprintf(file, "#\n## r (mm), z (mm), \n");
+    rmin = zmin = 99.9;
+    int RS = -R;
+    for (int rr=RS; rr<R+1; rr++) {
+      r = rr;
+      if (rr < 0) r= -rr;
+      for (z=0; z<L+1; z++) {
+        j = 0;
+        if (undepleted[r][z] == '.') j = 1;
+        if (undepleted[r][z] == '*') j = 2;
+        if (undepleted[r][z] == 'B') j = 2;
+	fprintf(file, "%7.2f %7.2f %d\n",
+		((float) rr)*grid,  ((float) z)*grid, j);
       }
       fprintf(file, "\n");
     }
     fclose(file);
   }
 
-
   if (WP == 0) return 0;
+  if (fully_depleted) {
+    /* save potential close to point contact,
+       to use later when calculating depletion voltage */
+    //for (z=0; z<LC+2; z++) {
+    //  for (r=0; r<RC+2; r++) {
+    for (z=0; z<L; z++) {
+      for (r=0; r<R; r++) {
+        vsave[z][r] = fabs(v[new][z][r]);
+      }
+    }
+  }
+
   /*
     -------------------------------------------------------------------------
     now calculate the weighting potential for the central contact
@@ -800,8 +958,9 @@ int main(int argc, char **argv)
 
     L  = lrint(setup.xtal_length/grid);
     R  = lrint(setup.xtal_radius/grid);
-    // BRT = lrint(setup.top_bullet_radius/grid);
-    // BRB = lrint(setup.bottom_bullet_radius/grid);
+    LiT = lrint(setup.Li_thickness/grid);
+    TBR = lrint(setup.top_bullet_radius/grid);
+    BBR = lrint(setup.bottom_bullet_radius/grid);
     LC = lrint(setup.pc_length/grid);
     dLC = setup.pc_length/grid - (float) LC;
     if (dLC < 0.05 && dLC > -0.05) dLC = 0;
@@ -850,11 +1009,24 @@ int main(int argc, char **argv)
     WO = lrint(setup.ditch_thickness/grid);
     LH = lrint(setup.hole_length/grid);
     RH = lrint(setup.hole_radius/grid);
+    HBR = lrint(setup.hole_bullet_radius/grid);
     OTL = lrint(setup.outer_taper_length/grid);
     OTW = lrint(setup.outer_taper_width/grid);
     HTL = lrint(setup.inner_taper_length/grid);
     HTW = lrint(setup.inner_taper_width/grid);
-    // LiT = lrint(setup.Li_thickness/grid);
+    /* set up bulletization inside hole */
+    for (z=L-LH; z<=L; z++) rrh[z] = RH;
+    if (LH > 0 && RH > 0 && HBR > 0) {
+      for (z=L-LH; z<L-LH+HBR+2; z++) {
+        a = setup.hole_radius - setup.hole_bullet_radius;
+        b = setup.xtal_length - setup.hole_length + setup.hole_bullet_radius - z*grid;
+        c = setup.hole_bullet_radius*setup.hole_bullet_radius - b*b;
+        if (c < 0.0) c = 0;
+        c = a + sqrt(c);
+        rrh[z] = lrint(c/grid);
+      }
+    }
+    //if (RO <= 0.0 || RO >= R) RO = R - LT/3;    // inner radius of taper, in grid lengths
     if (RO <= 0.0 || RO >= R) RO = R - LT;    // inner radius of taper, in grid lengths
 
     if (istep == 0) {
@@ -903,14 +1075,15 @@ int main(int argc, char **argv)
 	// boundary conditions
 	bulk[z][r] = 0;  // normal bulk, no complications
 	// outside (HV) contact:
-	if (z == L ||
-	    r == R ||
-	    r >= z + R - LT ||          // bottom taper
-	    (z == 0 && r >= RO) ||      // wrap-around
-            (L-z <= LH && r <= RH) ||   // hole
-            (L-z < OTL && r >= OT_R) || // outer taper
-            (L-z < HTL && r <= IT_R)    // inner taper
-            ) {
+	if (z >= L-LiT ||
+	    r >= R-LiT ||
+	    //r >= z/3 + R - LT/3 ||           // bottom taper
+	    r >= z + R-LiT - LT ||             // bottom taper  // FIXME: LiT at angle
+	    (z <= LiT && r >= RO) ||           // wrap-around
+            (L-z <= LH && r <= rrh[z]+LiT) ||  // hole
+            (L-z < OTL && r >= OT_R-LiT) ||    // outer taper  // FIXME: LiT at angle
+            (L-z < HTL && r <= IT_R+LiT) ||    // inner taper  // FIXME: LiT at angle
+            TBR_TEST || BBR_TEST) {            // top and bottom bulletization
 	  bulk[z][r] = -1;                 // value of v[*][z][r] is fixed...
 	  v[0][z][r] = v[1][z][r] = 0.0;   // to zero
 	}
@@ -954,6 +1127,10 @@ int main(int argc, char **argv)
 
     // now do the actual relaxation
     for (iter=0; iter<max_its; iter++) {
+      double OR_fact = OVER_RELAX_FACTOR;
+      if (iter < 2) OR_fact = 0.0;
+      else if (iter < 200) OR_fact *= 0.9;
+
       if (old == 0) {
 	old = 1;
 	new = 0;
@@ -968,6 +1145,8 @@ int main(int argc, char **argv)
       for (z=0; z<L; z++) {
 	for (r=0; r<R; r++) {
 	  if (bulk[z][r] < 0) continue;      // outside or inside contact
+          save_dif = v[old][z][r] - v[new][z][r];  // step difference from previous iteration
+          // if (iter < 2) save_dif = 0; 
 
 	  if (bulk[z][r] == 0) {            // normal bulk, no complications
 	    v_sum = v[old][z+1][r]*eps_dz[z][r] + v[old][z][r+1]*eps_dr[z][r]*s1[r];
@@ -1043,6 +1222,7 @@ int main(int argc, char **argv)
 	    mean = v_sum / eps_sum;
 	    v[new][z][r] = mean;
 	    dif = v[old][z][r] - v[new][z][r];
+            v[new][z][r] += OR_fact*save_dif; // do over-relaxation
 	    if (dif < 0.0f) dif = -dif;
 	    sum_dif += dif;
 	    if (max_dif < dif) max_dif = dif;
@@ -1094,12 +1274,6 @@ int main(int argc, char **argv)
       E_r = eps_dr[z][r]/16.0 * (v[new][z][r] - v[new][z][r+1])/(0.1*grid);
       E_z = eps_dz[z][r]/16.0 * (v[new][z][r] - v[new][z+1][r])/(0.1*grid);
       esum += (E_r*E_r + E_z*E_z) * (double) r;
-      /*
-      if ((z <= LC && r == rrc[z]) ||
-	  (z == LC && r <= rrc[z]) ||
-	  (z <= LC+1 && r == rrc[z]+1) || // average over two different surfaces
-	  (z == LC+1 && r <= rrc[z]+1)) {
-      */
       if ((r == RC && z <= LC) ||
 	  (r <= RC && z == LC) ||
 	  (r == RC+1 && z <= LC+1) || // average over two different surfaces
@@ -1121,16 +1295,14 @@ int main(int argc, char **argv)
     printf("\n");
   }
 
-  if (WP == 1) {
+  if (WP) {
     // write WP values to output file
-    char *wp_file_name = resolve_path_rel_to(setup.wp_name, setup.config_name);
-    if (!(file = fopen(wp_file_name, "w"))) {
-      printf("ERROR: Cannot open file %s for weighting potential...\n", wp_file_name);
+    if (!(file = fopen(setup.wp_name, "w"))) {
+      printf("ERROR: Cannot open file %s for weighting potential...\n", setup.wp_name);
       return 1;
     } else {
-      printf("Writing weighting potential to file %s\n", wp_file_name);
+      printf("Writing weighting potential to file %s\n\n", setup.wp_name);
     }
-    free(wp_file_name); wp_file_name = 0;
     /* copy configuration parameters to output file */
     report_config(file, config_file_name);
     fprintf(file, "#\n# HV bias in fieldgen: %.1f V\n", BV);
@@ -1141,14 +1313,106 @@ int main(int argc, char **argv)
       if (bubble_volts > 0.0f) fprintf(file, "# Pinch-off bubble at %.0f V potential\n", bubble_volts);
     }
     fprintf(file, "#\n## r (mm), z (mm), WP\n");
-    for (r=0; r<R+1; r++) {
-      for (z=0; z<L+1; z++) {
-	fprintf(file, "%7.2f %7.2f %10.6f\n",
-		((float) r)*grid,  ((float) z)*grid, v[new][z][r]);
+    if (WP > 1) {
+      for (r=-R; r<R+1; r++) {
+        if ((i=r) < 0) i = -r;
+        for (z=0; z<L+1; z++) {
+          fprintf(file, "%7.2f %7.2f %12.6e\n",
+                  ((float) r)*grid,  ((float) z)*grid, v[new][z][i]);
+        }
+        fprintf(file, "\n");
       }
-      fprintf(file, "\n");
+    } else {
+      for (r=0; r<R+1; r++) {
+        for (z=0; z<L+1; z++) {
+          fprintf(file, "%7.2f %7.2f %12.6e\n",
+                  ((float) r)*grid,  ((float) z)*grid, v[new][z][r]);
+        }
+        fprintf(file, "\n");
+      }
     }
     fclose(file);
+  }
+
+  if (fully_depleted) {
+    /* estimate depletion voltage */
+    min = BV;
+    for (z=0; z<LC+2; z++) {
+      for (r=0; r<RC+2; r++) {
+        if (vsave[z][r] > 0 &&
+            min > vsave[z][r] / (1.0 - v[new][z][r])) {
+          min = vsave[z][r] / (1.0 - v[new][z][r]);
+          vminr = r;
+          vminz = z;
+        }
+      }
+    }
+    // printf("Min V, WP = %.4f, %.4f at (r,z) = (%d,%d)\n",
+    //        vsave[vminz][vminr], v[new][vminz][vminr], vminr, vminz);
+
+    /* also try to check for bubble depletion / pinch-off
+       by seeing how much the bias must be reduced for any pixel to be in a local potential minimum */
+    min2 = BV;
+    vminr2 = vminz2 = 0;
+    /* first check along r=0 (z-axiz) */
+    for (z=LC+2; z<L-LH-2; z++) {
+      dVn[0] = vsave[z+1][0]  - vsave[z][0] ;
+      dWn[0] = v[new][z+1][0] - v[new][z][0];
+      dVn[1] = vsave[z-1][0]  - vsave[z][0] ;
+      dWn[1] = v[new][z-1][0] - v[new][z][0];
+      test = -1;
+      for (i=0; i<2; i++) {
+        if (dWn[i]*grid > 0.00001 && dVn[i] < 0 && test < -dVn[i]/dWn[i]) test = -dVn[i]/dWn[i];
+      }
+      if (test >= 0 && min2 > test) {
+        min2 = test;
+        vminr2 = 0;
+        vminz2 = z;
+        /* printf("   min %f   at (r,z) = (0, %.1f);  vsave= %f  vnew = %f\n",
+           min2, z*grid, vsave[z][0], v[new][z][0]); */
+      }
+    }
+    /* then check pinch-off for r > 0 */
+    for (z=LC+2; z<L-2; z++) {
+      for (r=1; r<R-2; r++) {
+        if (vsave[z][r] > 0 && v[new][z][r] > 0.0001) {
+          dVn[0] = vsave[z+1][r]  - vsave[z][r] ;
+          dWn[0] = v[new][z+1][r] - v[new][z][r];
+          dVn[1] = vsave[z-1][r]  - vsave[z][r] ;
+          dWn[1] = v[new][z-1][r] - v[new][z][r];
+          dVn[2] = vsave[z][r+1]  - vsave[z][r] ;
+          dWn[2] = v[new][z][r+1] - v[new][z][r];
+          dVn[3] = vsave[z][r-1]  - vsave[z][r] ;
+          dWn[3] = v[new][z][r-1] - v[new][z][r];
+          test = -1;
+          for (i=0; i<4; i++) {
+            if (dWn[i]*grid > 0.00001 && dVn[i] < 0 && test < -dVn[i]/dWn[i])
+              test = -dVn[i]/dWn[i];
+          }
+          if (test >= 0 && min2 > test) {
+            min2 = test;
+            vminr2 = r;
+            vminz2 = z;
+            if (0) {
+              printf("   min %.1f   at (r,z) = (%.1f, %.1f);  vsave= %.1f  vnew = %f\n",
+                     min2, r*grid, z*grid, vsave[z][r], v[new][z][r]);
+              printf("     ratios %9.1f %9.1f %9.1f %9.1f\n", -dVn[0]/dWn[0], -dVn[1]/dWn[1], -dVn[2]/dWn[2], -dVn[3]/dWn[3]);
+              printf("          E %9.6f %9.6f %9.6f %9.6f\n", dVn[0], dVn[1], dVn[2], dVn[3]);
+              printf("         dW %9.6f %9.6f %9.6f %9.6f\n", dWn[0], dWn[1], dWn[2], dWn[3]);
+            }
+          }
+        }
+      }
+    }
+    if (min2 < min) {
+      printf("\nEstimated pinch-off voltage = %.0f V\n", BV - min);
+      printf(" min2 = %.1f at (r,z) = (%.1f, %.1f), so\n", min2, vminr2*grid, vminz2*grid);
+      printf("   Full depletion (max pinch-off voltage) = %.0f\n", BV - min2);
+    } else {
+      printf("\nEstimated depletion voltage = %.0f V\n", BV - min);
+    }
+    printf("\nMinimum bulk field = %.1f V/cm at (r,z) = (%.1f, %.1f) mm\n\n",
+           Emin, rmin, zmin);
   }
 
   return 0;

@@ -3,7 +3,6 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
-#include <assert.h>
 #include "mjd_siggen.h"
 
 int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
@@ -24,12 +23,14 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
     "bottom_taper_length",  // note: these two keywords must stay adjacent, in this order
     "taper_length",         // <- for compatibility with old mjd config files, == "bottom taper_length
     "outer_taper_length",
+    "outer_taper_width",
     "taper_angle",
     "inner_taper_length",
-    "outer_taper_width",
     "inner_taper_width",
+    "hole_length_gap",     // can use gap (i.e. xtal_length - hole_length) instead. This keyword must be before "hole_length".
     "hole_length",
     "hole_radius",
+    "hole_bullet_radius",
     "wrap_around_radius",
     "ditch_depth",
     "ditch_thickness",
@@ -43,6 +44,8 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
     "impurity_radial_mult",
     "impurity_rpower",
     "xtal_HV",
+    "surface_drift_vel_factor",
+
     "drift_name",
     "field_name",
     "wp_name",
@@ -52,8 +55,6 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
     "step_time_calc",
     "step_time_out",
     "charge_cloud_size",
-    "use_acceleration",
-    "use_repulsion",
     "use_diffusion",
     "energy",
     "verbosity_level",
@@ -63,37 +64,48 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
     ""
   };
 
-  int   ii, i, l, n=0, ok, iint = 0;
+  int   ii, i, l, n=0, ok, iint = 0, diameter = 0;
   float fi;
-  char  *c, line[256], name[256];
+  char  *c, line[256], line2[256], name[256];
   FILE  *file;
 
 
   /* initialize everything to zero... */
   memset(setup, 0, sizeof(*setup));
   /* ...except for impurity_radial_mult */
-  setup->impurity_radial_mult = 1.0f;  // 1.0 is neutral (no radial gradient)
+  setup->impurity_radial_mult = 1.0f;      // 1.0 is neutral (no radial gradient)
+  setup->surface_drift_vel_factor = 1.0f;  // normal fast drift, same as bulk
 
   if (!(file = fopen(config_file_name, "r"))) {
     printf("\nERROR: config file %s does not exist?\n", config_file_name);
     return 1;
   }
-
-  /* store config file name */
-  strncpy(setup->config_name, config_file_name, 256);
-
   /* read config file */
   printf("\nReading values from config file %s\n", config_file_name);
   while (fgets(line, sizeof(line), file)) {
     n++;
     /* ignore comments and blank lines */
     if (strlen(line) < 3 || *line == ' ' || *line == '\t' || *line == '#') continue;
+    /* if line contains "_diam" (for diameter) replace with "_radius"
+       this allows the user to specify diametwrs instead of radii */
+    diameter = 0;
+    if ((c = strstr(line, "_diam"))) {
+      diameter = 1;
+      if (setup->verbosity >= CHATTY) printf("Line: %s", line);
+      strcpy(line2, c+5);
+      strcpy(c, "_radius");
+      strcpy(c+7, line2);
+      if (setup->verbosity >= CHATTY) printf("   -->  %s", line);      
+    }
+
     for (i=0; (l=strlen(key_word[i])) > 0; i++) {
       if (!strncmp(line, key_word[i], l)) {
 	/* line starts with key_word[i] */
+      printf("Line: %s", line);
 	if (line[l] != ' ' && line[l] != '\t') {
 	  ok = 0;
 	} else {
+	  // for (c = line + l; *c != ' ' && *c != '\t'; c++) ;
 	  /* find next non-white-space char */
 	  for (c = line + l; *c == ' ' || *c == '\t'; c++) ;
 	  name[0] = 0;
@@ -107,8 +119,6 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
 	    }
 	    name[ok] = '\0';	    
 	  } else if (!strncmp("time_steps_calc", key_word[i], l) ||
-		     !strncmp("use_acceleration", key_word[i], l) ||
-		     !strncmp("use_repulsion", key_word[i], l) ||
 		     !strncmp("use_diffusion", key_word[i], l) ||
 		     !strncmp("verbosity_level", key_word[i], l) ||
 		     !strncmp("max_iterations", key_word[i], l) ||
@@ -121,6 +131,7 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
 	  } else {
 	    /* extract float value */
 	    ok = sscanf(c, "%f", &fi);
+            if (diameter) fi /= 2.0;
 	  }
 	}
 	if (ok < 1) {
@@ -155,18 +166,25 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
 	  setup->bottom_taper_length = fi;
 	} else if (strstr(key_word[i], "outer_taper_length")) {
 	  setup->outer_taper_length = fi;
+	} else if (strstr(key_word[i], "outer_taper_width")) {
+	  setup->outer_taper_width = fi;
 	} else if (strstr(key_word[i], "taper_angle")) {
 	  setup->taper_angle = fi;
 	} else if (strstr(key_word[i], "inner_taper_length")) {
 	  setup->inner_taper_length = fi;
-	} else if (strstr(key_word[i], "outer_taper_width")) {
-	  setup->outer_taper_width = fi;
 	} else if (strstr(key_word[i], "inner_taper_width")) {
 	  setup->inner_taper_width = fi;
 	} else if (strstr(key_word[i], "hole_length")) {
 	  setup->hole_length = fi;
+          /* the user can specify "hole_length_gap" = xtal_length - hole_length, instead of "hole_length" */
+          if (strstr(line, "hole_length_gap")  && fi < setup->xtal_length) {
+            setup->hole_length = setup->xtal_length - fi;
+            if (setup->verbosity >= CHATTY) printf("   -->  hole_length: %f\n", setup->hole_length);
+          }
 	} else if (strstr(key_word[i], "hole_radius")) {
 	  setup->hole_radius = fi;
+	} else if (strstr(key_word[i], "hole_bullet_radius")) {
+	  setup->hole_bullet_radius = fi;
 	} else if (strstr(key_word[i], "wrap_around_radius")) {
 	  setup->wrap_around_radius = fi;
 	} else if (strstr(key_word[i], "ditch_depth")) {
@@ -193,6 +211,8 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
 	  setup->impurity_rpower = fi;
 	} else if (strstr(key_word[i], "xtal_HV")) {
 	  setup->xtal_HV = fi;
+	} else if (strstr(key_word[i], "surface_drift_vel_factor")) {
+	  setup->surface_drift_vel_factor = fi;
 	} else if (strstr(key_word[i], "drift_name")) {
 	  strncpy(setup->drift_name, name, 256);
 	} else if (strstr(key_word[i], "field_name")) {
@@ -211,10 +231,6 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
 	  setup->step_time_out = fi;
 	} else if (strstr(key_word[i], "charge_cloud_size")) {
 	  setup->charge_cloud_size = fi;
-	} else if (strstr(key_word[i], "use_acceleration")) {
-	  setup->use_acceleration = ii;
-	} else if (strstr(key_word[i], "use_repulsion")) {
-	  setup->use_repulsion= ii;
 	} else if (strstr(key_word[i], "use_diffusion")) {
 	  setup->use_diffusion = ii;
 	} else if (strstr(key_word[i], "energy")) {
@@ -264,8 +280,8 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
         setup->outer_taper_width > 0)
       setup->taper_angle =
         atan(setup->outer_taper_width/setup->outer_taper_length) * 180.0/3.14159;
-    if (setup->inner_taper_length > 0 &&
-        setup->inner_taper_width > 0)
+    else if (setup->inner_taper_length > 0 &&
+             setup->inner_taper_width > 0)
       setup->taper_angle =
         atan(setup->inner_taper_width/setup->inner_taper_length) * 180.0/3.14159;
     if (setup->taper_angle > 0)
@@ -273,13 +289,15 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
   }
 
   /* some consistency checks */
+  if (setup->hole_bullet_radius > setup->hole_radius)
+    setup->hole_bullet_radius = setup->hole_radius;
   if (setup->outer_taper_length > setup->xtal_length ||
       setup->inner_taper_length > setup->hole_length ||
       setup->hole_length > setup->xtal_length ||
       (setup->hole_radius +
        setup->outer_taper_width +
        setup->inner_taper_width) > setup->xtal_radius) {
-    printf("\nERROR: Inconsistent detector dimesions:\n"
+    printf("\nERROR: Inconsistent detector dimensions:\n"
            "   crystal length and radius: %5.2f %5.2f\n"
            "      hole length and radius: %5.2f %5.2f\n"
            "outer taper length and width: %5.2f %5.2f\n"
@@ -292,39 +310,4 @@ int read_config(char *config_file_name, MJD_Siggen_Setup *setup) {
   }
 
   return 0;
-}
-
-
-char* resolve_path_rel_to(const char* path, const char* ref_filename){
-  const char slash = '/';
-  const size_t max_input_str_len = 255;
-  char *result = 0;
-
-  size_t ref_len = strnlen(ref_filename, max_input_str_len);
-  size_t path_len = strnlen(path, max_input_str_len);
-
-  if ((ref_len >= 1) && (path[0] != slash)){
-    if (ref_filename[ref_len - 1] == slash) --ref_len;
-    size_t i = ref_len;
-    do{
-      if (ref_filename[i - 1] == slash) break;
-      --i;
-    } while (i != 0);
-    if (i != 0){
-      result = (char *) calloc(i + path_len + 1, sizeof(char));
-      memcpy(result, ref_filename, i);
-      memcpy(result + i, path, path_len + 1);
-      assert(result[i + path_len] == 0);
-      assert(strlen(result) == path_len + i);
-    }
-  }
-
-  if (result ==  0){
-    result = (char *) calloc(path_len + 1, sizeof(char));
-    memcpy(result, path, path_len + 1);
-    assert(result[path_len] == 0);
-    assert(strlen(result) == path_len);
-  }
-
-  return result;
 }

@@ -21,6 +21,7 @@
 
 #define MAX_FNAME_LEN 512
 
+static int nearest_field_grid_index(cyl_pt pt, cyl_int_pt *ipt, MJD_Siggen_Setup *setup);
 static int grid_weights(cyl_pt pt, cyl_int_pt ipt, float out[2][2], MJD_Siggen_Setup *setup);
 static cyl_pt efield(cyl_pt pt, cyl_int_pt ipt, MJD_Siggen_Setup *setup);
 static int setup_efield(MJD_Siggen_Setup *setup);
@@ -34,7 +35,6 @@ static int efield_exists(cyl_pt pt, MJD_Siggen_Setup *setup);
    returns 0 for success
 */
 int field_setup(MJD_Siggen_Setup *setup){
-  fields_finalize(setup);
 
   setup->rmin  = 0;
   setup->rmax  = setup->xtal_radius;
@@ -53,18 +53,18 @@ int field_setup(MJD_Siggen_Setup *setup){
 	      setup->xtal_temp);
 
   if (setup_velo(setup) != 0){
-    error("Failed to read drift velocity data, config file: %s\n",
-	  setup->config_name);
+    error("Failed to read drift velocity data from file: %s\n", 
+	  setup->drift_name);
     return -1;
   }
   if (setup_efield(setup) != 0){
-    error("Failed to read electric field data, config file: %s\n",
-	  setup->config_name);
+    error("Failed to read electric field data from file: %s\n", 
+	  setup->field_name);
     return -1;
   }
   if (setup_wp(setup) != 0){
-    error("Failed to read weighting potential, config file: %s\n",
-	  setup->config_name);
+    error("Failed to read weighting potential from file %s\n",
+	  setup->wp_name);
     return -1;
   }
 
@@ -80,9 +80,9 @@ static int efield_exists(cyl_pt pt, MJD_Siggen_Setup *setup){
     TELL_CHATTY("point %s is outside crystal\n", ptstr);
     return 0;
   }
-  ipt.r = (pt.r - setup->rmin)/setup->rstep;
+  ipt.r = (pt.r - setup->rmin)/setup->rstep;  // CHECKED: no need for lrintf
   ipt.phi = 0;
-  ipt.z = (pt.z - setup->zmin)/setup->zstep;
+  ipt.z = (pt.z - setup->zmin)/setup->zstep;  // CHECKED: no need for lrintf
 
   if (ipt.r < 0 || ipt.r + 1 >= setup->rlen ||
       ipt.z < 0 || ipt.z + 1 >= setup->zlen){
@@ -225,170 +225,6 @@ static cyl_pt efield(cyl_pt pt, cyl_int_pt ipt, MJD_Siggen_Setup *setup){
 }
 
 
-/* TC: get drift_velocity with linear superposition of 2 fields:
-		1. Detector field, E
-		2. Charge cloud field, Eadd
-*/
-int drift_velocity_w_Eadd(point pt, float q, vector *velo, MJD_Siggen_Setup *setup, cyl_pt Eadd)
-{
-  point  cart_en;
-  cyl_pt e, en, cyl;
-  cyl_int_pt ipt;
-  int   i, sign;
-  float abse, absv, f, a, b, c;
-  float bp, cp, en4, en6;
-  struct velocity_lookup *v_lookup1, *v_lookup2;
-
-  /*  DCR: replaced this with faster code below, saves calls to atan and tan
-  cyl = cart_to_cyl(pt);
-  if (nearest_field_grid_index(cyl, &ipt, setup) < 0) return -1;
-  e = efield(cyl, ipt, setup);
-  abse = vector_norm_cyl(e, &en);
-  en.phi = cyl.phi;
-  cart_en = cyl_to_cart(en);
-  */
-  cyl.r = sqrt(pt.x*pt.x + pt.y*pt.y);
-  cyl.z = pt.z;
-  cyl.phi = 0;
-  if (nearest_field_grid_index(cyl, &ipt, setup) < 0) return -1;
-  e = efield(cyl, ipt, setup);
-
-  // Add additional Efield
-  e.r	+= Eadd.r;
-  e.phi	+= Eadd.phi;
-  e.z	+= Eadd.z;
-  
-  abse = vector_norm_cyl(e, &en);
-  if (cyl.r > 0.001) {
-    cart_en.x = en.r * pt.x/cyl.r;
-    cart_en.y = en.r * pt.y/cyl.r;
-  } else {
-    cart_en.x = cart_en.y = 0;
-  }
-  cart_en.z = en.z;
-
-  /* find location in table to interpolate from */
-  for (i = 0; i < setup->v_lookup_len - 2 && abse > setup->v_lookup[i+1].e; i++);
-  v_lookup1 = setup->v_lookup + i;
-  v_lookup2 = setup->v_lookup + i+1;
-  f = (abse - v_lookup1->e)/(v_lookup2->e - v_lookup1->e);
-  if (q > 0){
-    a = (v_lookup2->ha - v_lookup1->ha)*f+v_lookup1->ha;
-    b = (v_lookup2->hb- v_lookup1->hb)*f+v_lookup1->hb;
-    c = (v_lookup2->hc - v_lookup1->hc)*f+v_lookup1->hc;
-    bp = (v_lookup2->hbp- v_lookup1->hbp)*f+v_lookup1->hbp;
-    cp = (v_lookup2->hcp - v_lookup1->hcp)*f+v_lookup1->hcp;
-    setup->dv_dE = (v_lookup2->h100 - v_lookup1->h100)/(v_lookup2->e - v_lookup1->e);
-  }else{
-    a = (v_lookup2->ea - v_lookup1->ea)*f+v_lookup1->ea;
-    b = (v_lookup2->eb- v_lookup1->eb)*f+v_lookup1->eb;
-    c = (v_lookup2->ec - v_lookup1->ec)*f+v_lookup1->ec;
-    bp = (v_lookup2->ebp- v_lookup1->ebp)*f+v_lookup1->ebp;
-    cp = (v_lookup2->ecp - v_lookup1->ecp)*f+v_lookup1->ecp;
-    setup->dv_dE = (v_lookup2->e100 - v_lookup1->e100)/(v_lookup2->e - v_lookup1->e);
-  }
-  /* velocity can vary from the direction of the el. field
-     due to effect of crystal axes */
-#define POW4(x) ((x)*(x)*(x)*(x))
-#define POW6(x) ((x)*(x)*(x)*(x)*(x)*(x))
-  en4 = POW4(cart_en.x) + POW4(cart_en.y) + POW4(cart_en.z);
-  en6 = POW6(cart_en.x) + POW6(cart_en.y) + POW6(cart_en.z);
-  absv = a + b*en4 + c*en6;
-  sign = (q < 0 ? -1 : 1);
-  setup->v_over_E = absv / abse;
-  velo->x = sign*cart_en.x*(absv+bp*4*(cart_en.x*cart_en.x - en4)
-			    + cp*6*(POW4(cart_en.x) - en6));
-  velo->y = sign*cart_en.y*(absv+bp*4*(cart_en.y*cart_en.y - en4)
-			    + cp*6*(POW4(cart_en.y) - en6));
-  velo->z = sign*cart_en.z*(absv+bp*4*(cart_en.z*cart_en.z - en4)
-			    + cp*6*(POW4(cart_en.z) - en6));
-#undef POW4
-#undef POW6
-  return 0;
-}
-
-
-/* TC: get drift_velocity from Efield
-*/
-int drift_velocity_from_Efield(point pt, float q, vector *velo, MJD_Siggen_Setup *setup, cyl_pt Efield)
-{
-  point  cart_en;
-  cyl_pt e, en, cyl;
-  cyl_int_pt ipt;
-  int   i, sign;
-  float abse, absv, f, a, b, c;
-  float bp, cp, en4, en6;
-  struct velocity_lookup *v_lookup1, *v_lookup2;
-
-  /*  DCR: replaced this with faster code below, saves calls to atan and tan
-  cyl = cart_to_cyl(pt);
-  if (nearest_field_grid_index(cyl, &ipt, setup) < 0) return -1;
-  e = efield(cyl, ipt, setup);
-  abse = vector_norm_cyl(e, &en);
-  en.phi = cyl.phi;
-  cart_en = cyl_to_cart(en);
-  */
-  cyl.r = sqrt(pt.x*pt.x + pt.y*pt.y);
-  cyl.z = pt.z;
-  cyl.phi = 0;
-  if (nearest_field_grid_index(cyl, &ipt, setup) < 0) return -1;
-  
-  // Add additional Efield
-  e.r	= Efield.r;
-  e.phi	= Efield.phi;
-  e.z	= Efield.z;
-  
-  abse = vector_norm_cyl(e, &en);
-  if (cyl.r > 0.001) {
-    cart_en.x = en.r * pt.x/cyl.r;
-    cart_en.y = en.r * pt.y/cyl.r;
-  } else {
-    cart_en.x = cart_en.y = 0;
-  }
-  cart_en.z = en.z;
-
-  /* find location in table to interpolate from */
-  for (i = 0; i < setup->v_lookup_len - 2 && abse > setup->v_lookup[i+1].e; i++);
-  v_lookup1 = setup->v_lookup + i;
-  v_lookup2 = setup->v_lookup + i+1;
-  f = (abse - v_lookup1->e)/(v_lookup2->e - v_lookup1->e);
-  if (q > 0){
-    a = (v_lookup2->ha - v_lookup1->ha)*f+v_lookup1->ha;
-    b = (v_lookup2->hb- v_lookup1->hb)*f+v_lookup1->hb;
-    c = (v_lookup2->hc - v_lookup1->hc)*f+v_lookup1->hc;
-    bp = (v_lookup2->hbp- v_lookup1->hbp)*f+v_lookup1->hbp;
-    cp = (v_lookup2->hcp - v_lookup1->hcp)*f+v_lookup1->hcp;
-    setup->dv_dE = (v_lookup2->h100 - v_lookup1->h100)/(v_lookup2->e - v_lookup1->e);
-  }else{
-    a = (v_lookup2->ea - v_lookup1->ea)*f+v_lookup1->ea;
-    b = (v_lookup2->eb- v_lookup1->eb)*f+v_lookup1->eb;
-    c = (v_lookup2->ec - v_lookup1->ec)*f+v_lookup1->ec;
-    bp = (v_lookup2->ebp- v_lookup1->ebp)*f+v_lookup1->ebp;
-    cp = (v_lookup2->ecp - v_lookup1->ecp)*f+v_lookup1->ecp;
-    setup->dv_dE = (v_lookup2->e100 - v_lookup1->e100)/(v_lookup2->e - v_lookup1->e);
-  }
-  /* velocity can vary from the direction of the el. field
-     due to effect of crystal axes */
-#define POW4(x) ((x)*(x)*(x)*(x))
-#define POW6(x) ((x)*(x)*(x)*(x)*(x)*(x))
-  en4 = POW4(cart_en.x) + POW4(cart_en.y) + POW4(cart_en.z);
-  en6 = POW6(cart_en.x) + POW6(cart_en.y) + POW6(cart_en.z);
-  absv = a + b*en4 + c*en6;
-  sign = (q < 0 ? -1 : 1);
-  setup->v_over_E = absv / abse;
-  velo->x = sign*cart_en.x*(absv+bp*4*(cart_en.x*cart_en.x - en4)
-			    + cp*6*(POW4(cart_en.x) - en6));
-  velo->y = sign*cart_en.y*(absv+bp*4*(cart_en.y*cart_en.y - en4)
-			    + cp*6*(POW4(cart_en.y) - en6));
-  velo->z = sign*cart_en.z*(absv+bp*4*(cart_en.z*cart_en.z - en4)
-			    + cp*6*(POW4(cart_en.z) - en6));
-#undef POW4
-#undef POW6
-  return 0;
-}
-
-
-
 /* Find weights for 8 voxel corner points around pt for e/wp field*/
 /* DCR: modified to work for both interpolation and extrapolation */
 static int grid_weights(cyl_pt pt, cyl_int_pt ipt, float out[2][2],
@@ -406,9 +242,14 @@ static int grid_weights(cyl_pt pt, cyl_int_pt ipt, float out[2][2],
 }
 
 
+/*find existing integer field grid index closest to pt*/
 /* added DCR */
-int nearest_field_grid_index(cyl_pt pt, cyl_int_pt *ipt,
+static int nearest_field_grid_index(cyl_pt pt, cyl_int_pt *ipt,
 				    MJD_Siggen_Setup *setup){
+  /* returns <0 if outside crystal or too far from a valid grid point
+              0 if interpolation is okay
+              1 if we can find a point but extrapolation is needed
+  */
   static cyl_pt  last_pt;
   static cyl_int_pt last_ipt;
   static int     last_ret = -99;
@@ -433,9 +274,9 @@ int nearest_field_grid_index(cyl_pt pt, cyl_int_pt *ipt,
       for (dr=0; dr<3; dr++) {
 	new_pt.r = pt.r + d[dr]*setup->rstep;
 	if (efield_exists(new_pt, setup)) {
-	  last_ipt.r = (new_pt.r - setup->rmin)/setup->rstep;
+	  last_ipt.r = (new_pt.r - setup->rmin)/setup->rstep;  // CHECKED: do NOT use lrintf
 	  last_ipt.phi = 0;
-	  last_ipt.z = (new_pt.z - setup->zmin)/setup->zstep;
+	  last_ipt.z = (new_pt.z - setup->zmin)/setup->zstep;  // CHECKED: do NOT use lrintf
 	  *ipt = last_ipt;
 	  if (dr == 0 && dz == 0) {
 	    last_ret = 0;
@@ -476,12 +317,10 @@ static int setup_velo(MJD_Siggen_Setup *setup){
       return -1;
     }
   }
-  char *drift_file_name = resolve_path_rel_to(setup->drift_name, setup->config_name);
-  if ((fp = fopen(drift_file_name, "r")) == NULL){
-    error("failed to open velocity lookup table file: '%s'\n", drift_file_name);
+  if ((fp = fopen(setup->drift_name, "r")) == NULL){
+    error("failed to open velocity lookup table file: '%s'\n", setup->drift_name);
     return -1;
   }
-  free(drift_file_name); drift_file_name = 0;
   line[0] = '#';
   c = line;
   while ((line[0] == '#' || line[0] == '\0') && c != NULL) c = fgets(line, MAX_LINE, fp);
@@ -649,16 +488,14 @@ static int setup_velo(MJD_Siggen_Setup *setup){
 static int setup_efield(MJD_Siggen_Setup *setup){
   FILE   *fp;
   char   line[MAX_LINE], *cp;
-  int    i, j, lineno;
+  int    i, j, lineno = 0;
   float  v, eabs, er, ez;
   cyl_pt cyl, **efld;
 
-  char *field_file_name = resolve_path_rel_to(setup->field_name, setup->config_name);
-  if ((fp = fopen(field_file_name, "r")) == NULL){
-    error("failed to open electric field table: %s\n", field_file_name);
+  if ((fp = fopen(setup->field_name, "r")) == NULL){
+    error("failed to open electric field table: %s\n", setup->field_name);
     return 1;
   }
-  free(field_file_name); field_file_name = 0;
   
   setup->rlen = lrintf((setup->rmax - setup->rmin)/setup->rstep) + 1;
   setup->zlen = lrintf((setup->zmax - setup->zmin)/setup->zstep) + 1;
@@ -680,7 +517,6 @@ static int setup_efield(MJD_Siggen_Setup *setup){
     memset(efld[i], 0, setup->zlen*sizeof(*efld[i]));
   }
   TELL_NORMAL("Reading electric field data from file: %s\n", setup->field_name);
-  lineno = 0;
 
   /*now read the table*/
   while(fgets(line, MAX_LINE, fp) != NULL){
@@ -742,12 +578,10 @@ static int setup_wp(MJD_Siggen_Setup *setup){
     }
     memset(wpot[i], 0, setup->zlen*sizeof(*wpot[i]));
   }
-  char *wp_file_name = resolve_path_rel_to(setup->wp_name, setup->config_name);
-  if ((fp = fopen(wp_file_name, "r")) == NULL){
-    error("failed to open file: %s\n", wp_file_name);
+  if ((fp = fopen(setup->wp_name, "r")) == NULL){
+    error("failed to open file: %s\n", setup->wp_name);
     return -1;
   }
-  free(wp_file_name); wp_file_name = NULL;
   lineno = 0;
   TELL_NORMAL("Reading weighting potential from file: %s\n", setup->wp_name);
   while (fgets(line, MAX_LINE, fp) != NULL){
@@ -780,26 +614,16 @@ static int setup_wp(MJD_Siggen_Setup *setup){
 int fields_finalize(MJD_Siggen_Setup *setup){
   int i;
 
-  if (setup->efld != NULL) {
-    for (i = 0; i < lrintf((setup->rmax - setup->rmin)/setup->rstep) + 1; i++){
-      free(setup->efld[i]);
-    }
-    free(setup->efld);
-    setup->efld = NULL;
+  for (i = 0; i < lrintf((setup->rmax - setup->rmin)/setup->rstep) + 1; i++){
+    free(setup->efld[i]);
+    free(setup->wpot[i]);
   }
-
-  if (setup->wpot != NULL) {
-    for (i = 0; i < lrintf((setup->rmax - setup->rmin)/setup->rstep) + 1; i++){
-      free(setup->wpot[i]);
-    }
-    free(setup->wpot);
-    setup->wpot = NULL;
-  }
-
-  if (setup->v_lookup != NULL) {
-    free(setup->v_lookup);
-    setup->v_lookup = NULL;
-  }
+  free(setup->efld);
+  free(setup->wpot);
+  free(setup->v_lookup);
+  setup->efld = NULL;
+  setup->wpot = NULL;
+  setup->v_lookup = NULL;
 
   return 1;
 }
