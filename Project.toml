@@ -1,0 +1,8 @@
+name = "T6wEX"
+uuid = "3a127ff5-4d11-5183-bf22-d794519942ee"
+
+[deps]
+BinDeps = "9e28174c-4ba2-5203-b857-d8d62c4213ee"
+
+[compat]
+julia = "≥ 1.0.0"
